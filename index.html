@@ -3045,7 +3045,7 @@ function normalizePlayer(p,teamId,index,inflate=false){
     tradeRequested:!!p?.tradeRequested,
     injury:p?.injury&&Number(p.injury.gamesRemaining)>0?{
       name:String(p.injury.name||"Injury"),gamesRemaining:clamp(Math.round(Number(p.injury.gamesRemaining)||1),1,110),
-      severity:String(p.injury.severity||"minor"),createdTick:Number.isFinite(Number(p.injury.createdTick))?Number(p.injury.createdTick):0
+      severity:String(p.injury.severity||"minor"),total:clamp(Math.round(Number(p.injury.total)||Number(p.injury.gamesRemaining)||1),1,110),createdTick:Number.isFinite(Number(p.injury.createdTick))?Number(p.injury.createdTick):0
     }:null,
     injuryHistory:Array.isArray(p?.injuryHistory)?p.injuryHistory.slice(-20):[],
     recond:p?.recond&&Number(p.recond.games)>0?{name:String(p.recond.name||"Injury"),games:clamp(Math.round(Number(p.recond.games)),1,80),total:clamp(Math.round(Number(p.recond.total)||20),1,80),dip:clamp(Number(p.recond.dip)||0,0,.12)}:null,
@@ -3144,7 +3144,11 @@ function migrateLegacy(old){
   return fresh;
 }
 
+// v21: opening the game with ?new starts at team selection. The old save is left in storage until a team is chosen,
+// and ?new is dropped from the address bar so a refresh later restores the new franchise normally.
+const FRESH_LINK=(()=>{try{const f=new URLSearchParams(location.search).has("new");if(f){const u=new URL(location.href);u.searchParams.delete("new");history.replaceState(null,"",u.pathname+u.search+u.hash)}return f}catch{return false}})();
 function loadState(){
+  if(FRESH_LINK)return createInitialState();
   try{
     const raw=decodeSave(localStorage.getItem(SAVE_KEY)||localStorage.getItem(V14_SAVE_KEY));
     if(raw){const s=JSON.parse(raw);if([14,15].includes(Number(s?.version)))return normalizeV6(s)}
@@ -3358,7 +3362,7 @@ function serializeState(){state.rng=rngState;return JSON.stringify(state,(k,v)=>
 function encodeSave(json){try{if(typeof TextEncoder==="undefined")return json;return SAVE_PREFIX+lzwCompress(json)}catch{return json}}
 function decodeSave(raw){if(!raw)return null;if(raw.startsWith(SAVE_PREFIX))return lzwDecompress(raw.slice(SAVE_PREFIX.length));return raw}
 let saveTimer=null,saveFailed=false;
-function writeSaveNow(){saveTimer=null;let json="";try{json=encodeSave(serializeState())}catch{return}try{localStorage.setItem(SAVE_KEY,json);if(saveFailed){saveFailed=false;setStatus("Auto-save is working again.")}}catch(e){if(!saveFailed){saveFailed=true;setStatus("Auto-save failed: browser storage is full. Open About to export your save.")}}}
+function writeSaveNow(){saveTimer=null;if(FRESH_LINK&&!state.teamSelectionComplete)return;let json="";try{json=encodeSave(serializeState())}catch{return}try{localStorage.setItem(SAVE_KEY,json);if(saveFailed){saveFailed=false;setStatus("Auto-save is working again.")}}catch(e){if(!saveFailed){saveFailed=true;setStatus("Auto-save failed: browser storage is full. Open About to export your save.")}}}
 // Saves are coalesced: many actions call save() in one tick, but the state is serialized once.
 function save(){if(saveTimer!==null)return;saveTimer=setTimeout(writeSaveNow,150)}
 function flushSave(){if(saveTimer!==null){clearTimeout(saveTimer);writeSaveNow()}}
@@ -3828,7 +3832,7 @@ function maybeInjurePlayer(p,teamId,minutes,playoff=false){
   let games=rand(type.min,type.max);
   if(durability>=86)games=Math.max(1,Math.round(games*.85));
   if(durability<=58)games=Math.round(games*1.25);games=Math.min(110,games);
-  p.injury={name:type.name,severity:type.severity,gamesRemaining:games,createdTick:state.healthTick};
+  p.injury={name:type.name,severity:type.severity,gamesRemaining:games,total:games,createdTick:state.healthTick};
   p.injuryHistory=(p.injuryHistory||[]).concat([{season:state.season,round:state.round,name:type.name,games}]).slice(-20);
   addNews(`${p.name} suffers ${type.name}`,`${teamName(teamId)} will be without ${p.name} for approximately ${games} game${games===1?"":"s"}.`,"injury",teamId,p.id);
   addTransaction(`${p.name} (${teamName(teamId)}) suffered ${type.name} and will miss about ${games} games.`,"other");
@@ -5130,19 +5134,7 @@ function randNormal(){
 
 // Some stars have very different night-to-night scoring shapes even when their averages are similar.
 // These overrides keep signature players recognizable; everyone else is derived from role, shot diet and usage.
-const SCORING_SHAPE_OVERRIDES={
-  "shai gilgeous alexander":{cv:.16,coldProb:.018,hotProb:.045,coldDrop:.24,hotBoost:.28,explosionProb:.0015,explosionBoost:.50,floor:18,ceiling:55},
-  "luka doncic":{cv:.24,coldProb:.07,hotProb:.10,coldDrop:.28,hotBoost:.42,explosionProb:.012,explosionBoost:.82,floor:12,ceiling:78},
-  "stephen curry":{cv:.28,coldProb:.085,hotProb:.11,coldDrop:.34,hotBoost:.43,explosionProb:.010,explosionBoost:.75,floor:7,ceiling:65},
-  "devin booker":{cv:.25,coldProb:.065,hotProb:.095,coldDrop:.29,hotBoost:.40,explosionProb:.008,explosionBoost:.72,floor:9,ceiling:72},
-  "donovan mitchell":{cv:.26,coldProb:.07,hotProb:.10,coldDrop:.30,hotBoost:.42,explosionProb:.009,explosionBoost:.78,floor:9,ceiling:75},
-  "anthony edwards":{cv:.26,coldProb:.07,hotProb:.10,coldDrop:.30,hotBoost:.40,explosionProb:.009,explosionBoost:.72,floor:9,ceiling:70},
-  "jayson tatum":{cv:.22,coldProb:.05,hotProb:.075,coldDrop:.27,hotBoost:.34,explosionProb:.005,explosionBoost:.62,floor:11,ceiling:62},
-  "giannis antetokounmpo":{cv:.20,coldProb:.04,hotProb:.075,coldDrop:.24,hotBoost:.34,explosionProb:.004,explosionBoost:.58,floor:13,ceiling:58},
-  "nikola jokic":{cv:.19,coldProb:.04,hotProb:.065,coldDrop:.23,hotBoost:.31,explosionProb:.003,explosionBoost:.52,floor:11,ceiling:56},
-  "kevin durant":{cv:.20,coldProb:.045,hotProb:.075,coldDrop:.25,hotBoost:.34,explosionProb:.004,explosionBoost:.58,floor:10,ceiling:60},
-  "joel embiid":{cv:.23,coldProb:.055,hotProb:.09,coldDrop:.27,hotBoost:.38,explosionProb:.007,explosionBoost:.68,floor:11,ceiling:70}
-};
+const SCORING_SHAPE_OVERRIDES={}; // v21: no hand-written star shapes; volatility is derived from each player's own profile.
 function scoringShapeForPlayer(p,expected){
   const key=canonicalPlayerName(p.name),manual=SCORING_SHAPE_OVERRIDES[key];if(manual)return manual;
   const t=p.tendencies||generateTendencies(p),sum=Math.max(1,(t.three||0)+(t.rim||0)+(t.mid||0));
@@ -5229,8 +5221,6 @@ function pbpGameProfile(p,teamId,minutes){
   if(r<shape.coldProb){gameForm-=.024+shape.coldDrop*.085*(.7+Math.random()*.6);usageForm*=1-shape.coldDrop*(.24+Math.random()*.20)}
   else if(r<shape.coldProb+shape.hotProb){gameForm+=.022+shape.hotBoost*.080*(.7+Math.random()*.6);usageForm*=1+shape.hotBoost*(.20+Math.random()*.22)}
   if(Math.random()<shape.explosionProb){gameForm+=.045+shape.explosionBoost*.055;usageForm*=1+shape.explosionBoost*(.40+Math.random()*.30)}
-  if(expected>=25&&shape.cv<=.18){gameForm=Math.max(gameForm,-.052);usageForm=Math.max(usageForm,.84)}
-  else if(expected>=25&&shape.cv<=.21){gameForm=Math.max(gameForm,-.070);usageForm=Math.max(usageForm,.76)}
   return{gameForm:clamp(gameForm*.80,-.09,shape.cv>=.24?.125:.11),usageForm:clamp(usageForm,.62,shape.cv>=.24?1.9:1.7)};
 }
 function pbpInitBox(rotation){
@@ -5322,21 +5312,24 @@ function eliteReboundTarget(p,teamId,minutes){
 }
 function pbpExpectedTicks(p){return Math.max(55,(Number(p?.realStatProfile?.mpg)||34)*4.15)}
 function pbpProgress(line,p){return clamp((Number(line?.courtTicks)||0)/pbpExpectedTicks(p),0,1.18)}
-function pbpAssistNeed(p,line,teamId){
+function pbpAssistNeed(p,line,teamId){return 1; // v21: no pull toward a target line
+
   if(!p||!line)return 1;
   const target=eliteAssistTarget(p,teamId,Math.max(18,Number(p?.realStatProfile?.mpg)||34));
   if(target<=0)return 1;
   const expected=target*pbpProgress(line,p),gap=expected-(Number(line.ast)||0);
   return clamp(1+gap*.27,.52,3.15);
 }
-function pbpReboundNeed(p,line,teamId){
+function pbpReboundNeed(p,line,teamId){return 1; // v21
+
   if(!p||!line)return 1;
   const target=eliteReboundTarget(p,teamId,Math.max(18,Number(p?.realStatProfile?.mpg)||34));
   if(target<=0)return 1;
   const expected=target*pbpProgress(line,p),gap=expected-(Number(line.reb)||0);
   return clamp(1+gap*.20,.55,3.10);
 }
-function pbpStockNeed(p,line,key,teamId){
+function pbpStockNeed(p,line,key,teamId){return 1; // v21
+
   if(!p||!line)return 1;
   const target=pbpStatTarget(p,key,teamId,Math.max(18,Number(p?.realStatProfile?.mpg)||34));
   if(target<=0)return 1;
@@ -5344,7 +5337,8 @@ function pbpStockNeed(p,line,key,teamId){
   const strength=key==="bpg"?.42:.30;
   return clamp(1+gap*strength,.50,key==="bpg"?3.15:2.45);
 }
-function pbpScoringNeed(p,line,teamId){
+function pbpScoringNeed(p,line,teamId){return 1; // v21
+
   if(!p||!line)return 1;
   const mins=Math.max(18,Number(p?.realStatProfile?.mpg)||34),target=eliteScoringTarget(p,teamId,mins);
   if(target<12)return 1;
@@ -5383,7 +5377,8 @@ function pbpUsageWeight(p,teamId,kind="score",box=null){
   const expectedForShape=Math.max(2,realPpg||scoringRate),shape=scoringShapeForPlayer(p,expectedForShape);
   const targetUsage=clamp(.150+scoringRate*.00665+targetApg*.0018,.145,.438);
   const used=line?(line.fga||0)+.44*(line.fta||0)+(line.tov||0):0,currentUsage=line&&line.courtTicks>8?used*2/line.courtTicks:targetUsage;
-  const pull=clamp(1.16+(.25-shape.cv)*7.6,.84,1.92),needMax=shape.cv<=.18?2.08:shape.cv<=.21?1.94:shape.cv>=.24?1.72:1.84,need=clamp(1+(targetUsage-currentUsage)*pull*3.25,.60,needMax);
+  const pull=clamp(1.16+(.25-shape.cv)*7.6,.84,1.92),needMax=shape.cv<=.18?2.08:shape.cv<=.21?1.94:shape.cv>=.24?1.72:1.84,need=1; // v21: usage is not steered toward a target; it comes from the player's identity and the game flow
+
   if(kind==="pass"){
     // Elite creation is deliberately nonlinear: a 10-11 APG hub should control far more
     // creation possessions than a merely good 6-7 APG secondary handler.
@@ -5460,7 +5455,7 @@ function pbpResolvePossession(ctx,depth=0){
   if(Math.random()<tov){
     sLine.tov++;
     const stealer=pbpPickStealer(defLineup,defBox,defTeam),stealLine=stealer?defBox.get(stealer.id):null,stealTarget=stealer?pbpStatTarget(stealer,"spg",defTeam,Math.max(18,stealer.realStatProfile?.mpg||34)):0;
-    const stealProb=stealer?clamp(.54+((stealer.ratings?.steal||65)-65)*.0050+stealTarget*.040,.40,.86):0;
+    const stealProb=stealer?clamp(.32+((stealer.ratings?.steal||65)-65)*.0050+stealTarget*.22,.25,.88):0;
     if(stealLine&&Math.random()<stealProb)stealLine.stl++;
     return{points:0,play,turnover:true,triggerTransition:true}
   }
@@ -5494,8 +5489,8 @@ function pbpResolvePossession(ctx,depth=0){
   if(period>=4&&seconds<=240&&Math.abs(scoreDiff)<=6)make+=((r.clutch||70)-70)*.00065;
   const blocker=pbpPickBlocker(defLineup,defBox,defTeam,shotType,shooter),blockLine=blocker?defBox.get(blocker.id):null,br=blocker?.ratings||{};
   const blockTarget=blocker?pbpStatTarget(blocker,"bpg",defTeam,Math.max(18,blocker.realStatProfile?.mpg||34)):0,blockNeed=blocker?pbpStockNeed(blocker,blockLine,"bpg",defTeam):1;
-  const blockBase=shotType==="rim"?.052:shotType==="mid"?.016:.003;
-  const blockProb=clamp((blockBase+((br.block||55)-60)*.00105+(shotType==="rim"?((br.interiorD||60)-65)*.00045:0)+blockTarget*(shotType==="rim"?.014:.006))*blockNeed,.001,shotType==="rim"?.265:.12);
+  const blockBase=shotType==="rim"?.016:shotType==="mid"?.010:.002;
+  const blockProb=clamp((blockBase+((br.block||55)-60)*.00105+(shotType==="rim"?((br.interiorD||60)-65)*.00045:0)+blockTarget*(shotType==="rim"?.098:.006))*blockNeed,.001,shotType==="rim"?.38:.12);
   if(blockLine&&Math.random()<blockProb){blockLine.blk++;make=0}
   make=clamp(make,shotType==="three"?.235:.27,shotType==="rim"?.79:shotType==="mid"?.61:.54);
   if(Math.random()<make){const pts=shotType==="three"?3:2;sLine.fgm++;sLine.pts+=pts;if(shotType==="three")sLine.threeM++;
@@ -5531,13 +5526,15 @@ function pbpSimulatePeriod(period,teamPoss,game){
 }
 
 // v20: players returning from long injuries play below their rating for a while, fading linearly back to normal.
-const RECOND_TABLE={"Torn ACL":{dip:.07,games:38},"Achilles Tear":{dip:.09,games:45},"Meniscus Tear":{dip:.04,games:18},"Stress Fracture":{dip:.035,games:16}};
+// v21: rust is not a lookup table. Size and length grow with games missed and shrink for young, durable players.
 function startReconditioning(p,scale=1){
   const inj=p.injury;if(!inj)return;
-  let t=RECOND_TABLE[inj.name];if(!t&&inj.severity==="serious")t={dip:.02,games:7};if(!t)return;
-  const dur=p.ratings?.durability||75,age=Number(p.age)||26,ageF=age>=33?1.25:age>=30?1.12:age<=24?.85:1,durF=dur>=86?.85:dur<=58?1.15:1;
-  const total=Math.max(3,Math.round(t.games*ageF*durF*scale));
-  p.recond={name:inj.name,games:total,total,dip:Math.min(.12,t.dip*(age>=33?1.15:1))};
+  const missed=Number(inj.total)||Number(inj.gamesRemaining)||0;if(missed<8)return;
+  const dur=p.ratings?.durability||75,age=Number(p.age)||26;
+  const ageF=age>=34?1.30:age>=31?1.15:age<=23?.80:age<=26?.92:1,durF=clamp(1+(75-dur)*.008,.8,1.25),sevF=inj.severity==="major"?1.15:inj.severity==="serious"?1:.8;
+  const dip=clamp(.0035*Math.pow(missed,.65)*ageF*durF*sevF,0,.12);
+  const total=Math.max(3,Math.round(clamp(missed*.45,4,45)*ageF*durF*scale));
+  p.recond={name:inj.name,games:total,total,dip};
 }
 function reconditionFactor(p){const r=p&&p.recond;return r&&r.games>0?1-r.dip*Math.min(1,r.games/Math.max(1,r.total)):1}
 function scaleRatingsBy(r,f){const o={};for(const k in r)o[k]=(typeof r[k]==="number"&&k!=="durability")?Math.round(r[k]*f*10)/10:r[k];return o}
